@@ -1,85 +1,41 @@
-package com.barkodsayim.app
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
 
-import android.annotation.SuppressLint
-import android.os.Build
-import android.os.Bundle
-import android.view.KeyEvent
-import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
-import android.webkit.ConsoleMessage
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.appcompat.app.AppCompatActivity
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Excel/CSV indirme icin (Android 9 ve oncesinde gerekli) -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                     android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                     android:maxSdkVersion="32"/>
 
-/**
- * Barkod Sayim — Native Android WebView wrapper.
- *
- * Tum web uygulamasi assets/ klasorunden yuklenir. Firebase yapilandirilmissa
- * Firestore'a internet uzerinden baglanir; degilse yerel mod calisir.
- *
- * iData lazerleri Keyboard Wedge modunda calistigi icin WebView icindeki
- * input alanlarina dogrudan tarama yapilir.
- */
-class MainActivity : AppCompatActivity() {
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.BarkodSayim"
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:requestLegacyExternalStorage="true"
+        tools:targetApi="33">
 
-    private lateinit var webView: WebView
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.BarkodSayim">
 
-    @SuppressLint("SetJavaScriptEnabled")
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-
-        webView = WebView(this)
-        setContentView(webView)
-
-        with(webView.settings) {
-            javaScriptEnabled = true
-            domStorageEnabled = true           // localStorage / IndexedDB
-            allowFileAccess = false
-            allowContentAccess = false
-            cacheMode = WebSettings.LOAD_DEFAULT
-            mediaPlaybackRequiresUserGesture = false
-        }
-
-        // Iyi bir tarama deneyimi icin scrollbar gizle
-        webView.isVerticalScrollBarEnabled = true
-        webView.isHorizontalScrollBarEnabled = false
-        webView.overScrollMode = View.OVER_SCROLL_NEVER
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(
-                view: WebView, request: WebResourceRequest
-            ): Boolean = false   // ayni WebView icinde yukle
-        }
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(cm: ConsoleMessage): Boolean {
-                android.util.Log.d("BarkodSayim", "${cm.messageLevel()} ${cm.lineNumber()}: ${cm.message()}")
-                return true
-            }
-        }
-
-        // Statu cubugu temasi
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.insetsController?.setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS)
-        }
-
-        // Asset'lerden index.html yukle
-        webView.loadUrl("file:///android_asset/index.html")
-    }
-
-    /**
-     * iData tetik tusu bazi modellerde KEYCODE_F* veya KEYCODE_CAMERA gonderir.
-     * Bu durumda Wedge cikartmadiysak WebView'a iletilmesi gerek.
-     * Default davranisi koruyoruz; klavye-wedge zaten DOM'a dusurur.
-     */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        return super.onKeyDown(keyCode, event)
-    }
-
-    override fun onBackPressed() {
-        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
-    }
-}
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
