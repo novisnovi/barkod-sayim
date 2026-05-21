@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0f172a">
+<title>Barkod Sayım</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+
+<!-- Tailwind (CDN) -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- SheetJS - Excel/CSV okuma & yazma -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  html, body { height: 100%; }
+  body {
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: contain;
+  }
+  /* Lazer taradığında input görünmese de odaklı kalır */
+  .scan-input {
+    font-size: 18px;
+    letter-spacing: 1px;
+  }
+  /* Toast / Uyarı kutusu */
+  #toast {
+    position: fixed; left: 50%; top: 20px;
+    transform: translateX(-50%) translateY(-200%);
+    transition: transform 250ms ease;
+    z-index: 100;
+    pointer-events: none;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+  /* Sayım listesi yeni satır flash */
+  @keyframes flashOk {
+    0%   { background-color: rgba(34,197,94,.35); }
+    100% { background-color: transparent; }
+  }
+  .flash-ok { animation: flashOk 600ms ease-out; }
+  /* Numerik input spinner gizle */
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- ÜST BAR -->
+<header class="bg-slate-900 border-b border-slate-700 sticky top-0 z-30">
+  <div class="max-w-5xl mx-auto px-3 py-2 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <div class="w-8 h-8 rounded bg-emerald-500 flex items-center justify-center font-bold text-slate-900">B</div>
+      <h1 class="text-lg font-semibold">Barkod Sayım</h1>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <span id="dbStatus" class="px-2 py-1 rounded bg-slate-700">Yükleniyor…</span>
+    </div>
+  </div>
+  <!-- Sekmeler -->
+  <nav class="max-w-5xl mx-auto px-3 flex gap-1 text-sm">
+    <button data-tab="count"    class="tab-btn px-4 py-2 border-b-2 border-emerald-400 text-emerald-300 font-semibold">Sayım</button>
+    <button data-tab="products" class="tab-btn px-4 py-2 border-b-2 border-transparent text-slate-300">Ürünler</button>
+    <button data-tab="history"  class="tab-btn px-4 py-2 border-b-2 border-transparent text-slate-300">Geçmiş</button>
+  </nav>
+</header>
+
+<!-- TOAST -->
+<div id="toast" class="px-4 py-3 rounded-lg shadow-lg font-semibold"></div>
+
+<main class="max-w-5xl mx-auto p-3">
+
+  <!-- ============================ SEKME: SAYIM ============================ -->
+  <section id="tab-count" class="tab-panel space-y-3">
+
+    <div class="bg-slate-800 rounded-lg p-3">
+      <div class="flex items-end gap-2">
+        <div class="flex-1">
+          <label class="text-xs text-slate-400">Barkod / Ürün kodu (lazer ile okutun veya yazıp Enter)</label>
+          <input id="scanInput" type="text" autocomplete="off" autofocus
+                 class="scan-input w-full mt-1 px-3 py-3 rounded bg-slate-900 border border-slate-600 focus:border-emerald-400 focus:outline-none"
+                 placeholder="Okuyucuyu tetikleyin…">
+        </div>
+        <div class="w-24">
+          <label class="text-xs text-slate-400">Adet</label>
+          <input id="scanQty" type="number" min="1" value="1"
+                 class="w-full mt-1 px-3 py-3 rounded bg-slate-900 border border-slate-600 text-center focus:border-emerald-400 focus:outline-none">
+        </div>
+      </div>
+      <div class="flex gap-2 mt-3 text-sm">
+        <button id="btnExport" class="flex-1 bg-emerald-500 hover:bg-emerald-600 text-slate-900 font-semibold py-2 rounded">Excel'e Aktar</button>
+        <button id="btnFinish" class="flex-1 bg-blue-500 hover:bg-blue-600 font-semibold py-2 rounded">Sayımı Bitir</button>
+        <button id="btnClear"  class="bg-rose-600 hover:bg-rose-700 font-semibold py-2 px-3 rounded">Temizle</button>
+      </div>
+      <div class="mt-2 flex justify-between text-xs text-slate-400">
+        <span>Toplam satır: <b id="countRows" class="text-slate-200">0</b></span>
+        <span>Toplam adet: <b id="countTotal" class="text-slate-200">0</b></span>
+        <span>Bulunamayan: <b id="countMiss" class="text-rose-400">0</b></span>
+      </div>
+    </div>
+
+    <!-- Sayım listesi -->
+    <div class="bg-slate-800 rounded-lg overflow-hidden">
+      <div class="grid grid-cols-12 text-xs uppercase tracking-wide text-slate-400 bg-slate-900 px-3 py-2">
+        <div class="col-span-5">Ürün</div>
+        <div class="col-span-4">Barkod</div>
+        <div class="col-span-2 text-center">Adet</div>
+        <div class="col-span-1 text-right">Sil</div>
+      </div>
+      <div id="scanList" class="divide-y divide-slate-700"></div>
+      <div id="scanEmpty" class="text-center text-slate-500 py-10 text-sm">Henüz okutma yapılmadı.</div>
+    </div>
+  </section>
+
+  <!-- ============================ SEKME: ÜRÜNLER ============================ -->
+  <section id="tab-products" class="tab-panel hidden space-y-3">
+
+    <div class="bg-slate-800 rounded-lg p-3 space-y-2">
+      <div class="flex flex-wrap gap-2">
+        <label class="flex-1 min-w-[180px] bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded text-sm font-semibold cursor-pointer text-center">
+          Excel / CSV İçeri Aktar
+          <input id="fileImport" type="file" accept=".xlsx,.xls,.csv,.tsv" class="hidden">
+        </label>
+        <button id="btnAddProduct" class="bg-emerald-500 hover:bg-emerald-600 text-slate-900 px-3 py-2 rounded font-semibold text-sm">+ Manuel Ekle</button>
+        <button id="btnExportProducts" class="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded text-sm">Ürünleri Dışa Aktar</button>
+        <button id="btnDeleteAll" class="bg-rose-700 hover:bg-rose-800 px-3 py-2 rounded text-sm">Tümünü Sil</button>
+      </div>
+      <p class="text-xs text-slate-400">
+        İçe aktarılan dosyada şu sütunlar olmalı: <code class="text-emerald-300">kod</code>, <code class="text-emerald-300">barkod</code>, <code class="text-emerald-300">ad</code> (isteğe bağlı: <code class="text-emerald-300">birim</code>, <code class="text-emerald-300">fiyat</code>).
+        Bir ürünün birden fazla barkodu varsa <code>barkod</code> hücresinde noktalı virgül (;) ile ayırın.
+      </p>
+    </div>
+
+    <div class="bg-slate-800 rounded-lg p-3">
+      <input id="prodSearch" type="text" placeholder="Ürün adı, kodu veya barkod ile ara…"
+             class="w-full px-3 py-2 rounded bg-slate-900 border border-slate-600 focus:border-emerald-400 focus:outline-none text-sm">
+    </div>
+
+    <div class="bg-slate-800 rounded-lg overflow-hidden">
+      <div class="grid grid-cols-12 text-xs uppercase tracking-wide text-slate-400 bg-slate-900 px-3 py-2">
+        <div class="col-span-3">Kod</div>
+        <div class="col-span-5">Ad</div>
+        <div class="col-span-3">Barkod</div>
+        <div class="col-span-1 text-right">İşlem</div>
+      </div>
+      <div id="productList" class="divide-y divide-slate-700"></div>
+      <div id="productEmpty" class="text-center text-slate-500 py-10 text-sm">Henüz ürün tanımlı değil. Excel ile içe aktarın.</div>
+    </div>
+  </section>
+
+  <!-- ============================ SEKME: GEÇMİŞ ============================ -->
+  <section id="tab-history" class="tab-panel hidden space-y-3">
+    <div class="bg-slate-800 rounded-lg p-3 text-sm text-slate-300">
+      Bittirdiğiniz sayımlar burada listelenir. Tekrar dışa aktarabilirsiniz.
+    </div>
+    <div id="historyList" class="space-y-2"></div>
+    <div id="historyEmpty" class="text-center text-slate-500 py-10 text-sm">Henüz tamamlanmış sayım yok.</div>
+  </section>
+
+</main>
+
+<!-- ============================ MANUEL ÜRÜN EKLE MODAL ============================ -->
+<div id="modalProduct" class="fixed inset-0 bg-black/60 hidden items-center justify-center z-40 p-3">
+  <div class="bg-slate-800 rounded-lg w-full max-w-md p-4 space-y-3">
+    <h3 class="text-lg font-semibold">Ürün Ekle / Düzenle</h3>
+    <div>
+      <label class="text-xs text-slate-400">Ürün Kodu *</label>
+      <input id="pfKod" type="text" class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-600">
+    </div>
+    <div>
+      <label class="text-xs text-slate-400">Ürün Adı *</label>
+      <input id="pfAd" type="text" class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-600">
+    </div>
+    <div>
+      <label class="text-xs text-slate-400">Barkod(lar) — birden fazla ise ; ile ayırın</label>
+      <input id="pfBarkod" type="text" class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-600">
+    </div>
+    <div class="grid grid-cols-2 gap-2">
+      <div>
+        <label class="text-xs text-slate-400">Birim</label>
+        <input id="pfBirim" type="text" placeholder="adet" class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-600">
+      </div>
+      <div>
+        <label class="text-xs text-slate-400">Fiyat</label>
+        <input id="pfFiyat" type="number" step="0.01" class="w-full mt-1 px-3 py-2 rounded bg-slate-900 border border-slate-600">
+      </div>
+    </div>
+    <div class="flex gap-2 pt-2">
+      <button id="pfCancel" class="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded">İptal</button>
+      <button id="pfSave"   class="flex-1 bg-emerald-500 hover:bg-emerald-600 text-slate-900 font-semibold py-2 rounded">Kaydet</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ FIREBASE CONFIG ============================ -->
+<script src="firebase-config.js"></script>
+
+<!-- ============================ ANA UYGULAMA ============================ -->
+<script type="module">
+/* ===================================================================
+ *  Barkod Sayım — Tek-dosya web uygulaması
+ *  - iData lazer (keyboard-wedge modu) ile direkt çalışır
+ *  - Firebase Firestore varsa: ortak veritabanı (APK + web aynı veriyi görür)
+ *  - Yoksa: localStorage'a yedeklenir (offline mod)
+ * =================================================================== */
+
+const CFG = (window.FIREBASE_CONFIG || {});
+const USE_FIREBASE = !!(CFG.apiKey && CFG.projectId);
+
+let db = null;
+let firestoreApi = null;
+
+async function initFirebase() {
+  if (!USE_FIREBASE) {
+    setDbStatus("Yerel mod (Firebase yapılandırılmadı)", "bg-amber-700");
+    return;
+  }
+  try {
+    const appMod = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js");
+    const fsMod  = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
+    const app = appMod.initializeApp(CFG);
+    db = fsMod.getFirestore(app);
+    firestoreApi = fsMod;
+    setDbStatus("Firebase bağlı", "bg-emerald-600");
+  } catch (e) {
+    console.error(e);
+    setDbStatus("Firebase HATA — yerel modda", "bg-rose-700");
+  }
+}
+
+function setDbStatus(text, cls) {
+  const el = document.getElementById("dbStatus");
+  el.textContent = text;
+  el.className = "px-2 py-1 rounded " + cls;
+}
+
+/* ----- STATE ----- */
+let products = [];      // [{kod, ad, barkodlar:[..], birim, fiyat}]
+let scans    = [];      // [{kod, ad, barkod, adet, ts}]
+let history  = [];      // [{id, ad, tarih, satirlar:[]}]
+let barkodIndex = new Map();  // barkod -> ürün
+let kodIndex    = new Map();  // kod    -> ürün
+
+/* ----- STORAGE ----- */
+const LS_PROD = "bs_products";
+const LS_SCAN = "bs_currentScan";
+const LS_HIST = "bs_history";
+
+function saveLocal() {
+  localStorage.setItem(LS_PROD, JSON.stringify(products));
+  localStorage.setItem(LS_SCAN, JSON.stringify(scans));
+  localStorage.setItem(LS_HIST, JSON.stringify(history));
+}
+function loadLocal() {
+  try { products = JSON.parse(localStorage.getItem(LS_PROD) || "[]"); } catch { products = []; }
+  try { scans    = JSON.parse(localStorage.getItem(LS_SCAN) || "[]"); } catch { scans = []; }
+  try { history  = JSON.parse(localStorage.getItem(LS_HIST) || "[]"); } catch { history = []; }
+}
+
+async function loadProductsFromCloud() {
+  if (!db) return;
+  const { collection, getDocs } = firestoreApi;
+  const snap = await getDocs(collection(db, "products"));
+  products = [];
+  snap.forEach(doc => products.push(doc.data()));
+  reindex();
+  renderProducts();
+}
+
+async function saveProductCloud(p) {
+  if (!db) return;
+  const { doc, setDoc } = firestoreApi;
+  await setDoc(doc(db, "products", p.kod), p);
+}
+async function deleteProductCloud(kod) {
+  if (!db) return;
+  const { doc, deleteDoc } = firestoreApi;
+  await deleteDoc(doc(db, "products", kod));
+}
+
+/* ----- INDEX ----- */
+function reindex() {
+  barkodIndex.clear();
+  kodIndex.clear();
+  for (const p of products) {
+    kodIndex.set(normalize(p.kod), p);
+    for (const b of (p.barkodlar || [])) {
+      if (b) barkodIndex.set(normalize(b), p);
+    }
+  }
+}
+function normalize(s) { return String(s ?? "").trim(); }
+function lookup(code) {
+  const n = normalize(code);
+  return barkodIndex.get(n) || kodIndex.get(n) || null;
+}
+
+/* ===================================================================
+ *  TAB SWITCHING
+ * =================================================================== */
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => {
+      b.classList.remove("border-emerald-400","text-emerald-300","font-semibold");
+      b.classList.add("border-transparent","text-slate-300");
+    });
+    btn.classList.add("border-emerald-400","text-emerald-300","font-semibold");
+    btn.classList.remove("border-transparent","text-slate-300");
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.add("hidden"));
+    document.getElementById("tab-" + btn.dataset.tab).classList.remove("hidden");
+    if (btn.dataset.tab === "count") setTimeout(() => document.getElementById("scanInput").focus(), 50);
+    if (btn.dataset.tab === "history") renderHistory();
+  });
+});
+
+/* ===================================================================
+ *  TOAST / UYARI
+ * =================================================================== */
+let toastTimer;
+function toast(msg, type = "info") {
+  const el = document.getElementById("toast");
+  const colors = {
+    info:    "bg-slate-700 text-white",
+    ok:      "bg-emerald-500 text-slate-900",
+    warn:    "bg-amber-500 text-slate-900",
+    error:   "bg-rose-600 text-white",
+  };
+  el.className = "px-4 py-3 rounded-lg shadow-lg font-semibold " + (colors[type] || colors.info);
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+}
+// Hata için sesli bip
+function beepError() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.frequency.value = 220;
+    o.type = "square";
+    o.connect(g); g.connect(ctx.destination);
+    g.gain.value = 0.15;
+    o.start();
+    setTimeout(() => { o.stop(); ctx.close(); }, 250);
+  } catch {}
+}
+function beepOk() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.frequency.value = 880;
+    o.type = "sine";
+    o.connect(g); g.connect(ctx.destination);
+    g.gain.value = 0.08;
+    o.start();
+    setTimeout(() => { o.stop(); ctx.close(); }, 90);
+  } catch {}
+}
+
+/* ===================================================================
+ *  SAYIM EKRANI
+ * =================================================================== */
+const scanInput = document.getElementById("scanInput");
+const scanQty   = document.getElementById("scanQty");
+
+// Lazer her zaman bu input'a girer, sayım sekmesindeyken hep odakla
+function focusScan() {
+  if (document.getElementById("tab-count").classList.contains("hidden")) return;
+  if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "BUTTON")) return;
+  scanInput.focus();
+}
+setInterval(focusScan, 1000);
+document.addEventListener("click", (e) => {
+  // satır içi input düzenliyorsak müdahale etme
+  if (e.target.closest('input,button,textarea,select,a,label')) return;
+  focusScan();
+});
+
+scanInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const code = normalize(scanInput.value);
+    const qty  = Math.max(1, parseInt(scanQty.value) || 1);
+    scanInput.value = "";
+    if (!code) return;
+    handleScan(code, qty);
+    // Adet alanı default 1'e dönsün
+    scanQty.value = 1;
+  }
+});
+
+function handleScan(code, qty) {
+  const prod = lookup(code);
+  if (!prod) {
+    // 4. Madde: bulunamadıysa hata uyarısı
+    addMissingRow(code, qty);
+    toast(`❌ "${code}" tanımlı değil!`, "error");
+    beepError();
+    renderScans();
+    return;
+  }
+  // Aynı kod daha önce okutulduysa -> adeti artır
+  const existing = scans.find(s => s.kod === prod.kod);
+  if (existing) {
+    existing.adet += qty;
+    existing.ts = Date.now();
+    existing.flash = true;
+  } else {
+    scans.push({
+      kod: prod.kod, ad: prod.ad, barkod: code,
+      adet: qty, ts: Date.now(), flash: true
+    });
+  }
+  saveLocal();
+  beepOk();
+  renderScans();
+}
+
+function addMissingRow(code, qty) {
+  const existing = scans.find(s => s.kod === "?" && s.barkod === code);
+  if (existing) {
+    existing.adet += qty;
+    existing.flash = true;
+  } else {
+    scans.push({
+      kod: "?", ad: "TANIMLI DEĞİL", barkod: code,
+      adet: qty, ts: Date.now(), missing: true, flash: true
+    });
+  }
+  saveLocal();
+}
+
+function renderScans() {
+  const list = document.getElementById("scanList");
+  const empty = document.getElementById("scanEmpty");
+  list.innerHTML = "";
+  if (scans.length === 0) {
+    empty.classList.remove("hidden");
+  } else {
+    empty.classList.add("hidden");
+    // En son okutulan üste
+    const sorted = [...scans].sort((a,b) => b.ts - a.ts);
+    for (const s of sorted) {
+      const row = document.createElement("div");
+      row.className = "grid grid-cols-12 px-3 py-2 items-center text-sm " + (s.flash ? "flash-ok " : "") + (s.missing ? "bg-rose-900/30" : "");
+      row.innerHTML = `
+        <div class="col-span-5">
+          <div class="font-medium ${s.missing ? "text-rose-300" : ""}">${escapeHtml(s.ad)}</div>
+          <div class="text-xs text-slate-400">${escapeHtml(s.kod)}</div>
+        </div>
+        <div class="col-span-4 text-xs text-slate-300 break-all">${escapeHtml(s.barkod)}</div>
+        <div class="col-span-2 text-center">
+          <input type="number" min="1" value="${s.adet}" data-kod="${escapeHtml(s.kod)}" data-bk="${escapeHtml(s.barkod)}"
+                 class="qtyEdit w-16 px-2 py-1 rounded bg-slate-900 border border-slate-600 text-center">
+        </div>
+        <div class="col-span-1 text-right">
+          <button data-kod="${escapeHtml(s.kod)}" data-bk="${escapeHtml(s.barkod)}" class="delRow text-rose-400 hover:text-rose-300 text-lg">×</button>
+        </div>
+      `;
+      list.appendChild(row);
+      s.flash = false;
+    }
+  }
+  // Toplamlar
+  document.getElementById("countRows").textContent = scans.length;
+  document.getElementById("countTotal").textContent = scans.reduce((t,s)=>t+s.adet,0);
+  document.getElementById("countMiss").textContent  = scans.filter(s=>s.missing).length;
+
+  // Adet düzenleme
+  list.querySelectorAll(".qtyEdit").forEach(inp => {
+    inp.addEventListener("change", () => {
+      const kod = inp.dataset.kod, bk = inp.dataset.bk;
+      const target = scans.find(s => s.kod === kod && s.barkod === bk);
+      if (target) {
+        const v = parseInt(inp.value) || 1;
+        target.adet = Math.max(1, v);
+        saveLocal();
+        renderScans();
+      }
+    });
+    // Sayım inputu odaklı kalması için, qty inp blur olunca scan odağı
+    inp.addEventListener("blur", () => setTimeout(focusScan, 200));
+  });
+  // Satır sil
+  list.querySelectorAll(".delRow").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const kod = btn.dataset.kod, bk = btn.dataset.bk;
+      scans = scans.filter(s => !(s.kod === kod && s.barkod === bk));
+      saveLocal();
+      renderScans();
+    });
+  });
+}
+
+document.getElementById("btnClear").addEventListener("click", () => {
+  if (scans.length === 0) return;
+  if (!confirm("Tüm sayım satırları silinsin mi?")) return;
+  scans = [];
+  saveLocal();
+  renderScans();
+});
+
+document.getElementById("btnExport").addEventListener("click", () => {
+  if (scans.length === 0) { toast("Sayım listesi boş.", "warn"); return; }
+  exportScansToExcel(scans, "sayim");
+});
+
+document.getElementById("btnFinish").addEventListener("click", () => {
+  if (scans.length === 0) { toast("Sayım listesi boş.", "warn"); return; }
+  const name = prompt("Bu sayım için bir ad girin:", "Sayım " + new Date().toLocaleString("tr-TR"));
+  if (name === null) return;
+  history.unshift({
+    id: "h" + Date.now(),
+    ad: name || "Sayım",
+    tarih: new Date().toISOString(),
+    satirlar: scans
+  });
+  // Cloud kayıt
+  saveSessionCloud(history[0]);
+  scans = [];
+  saveLocal();
+  renderScans();
+  toast("Sayım kaydedildi.", "ok");
+});
+
+async function saveSessionCloud(session) {
+  if (!db) return;
+  try {
+    const { doc, setDoc } = firestoreApi;
+    await setDoc(doc(db, "sessions", session.id), session);
+  } catch (e) { console.error(e); }
+}
+
+/* ===================================================================
+ *  EXCEL EXPORT (sayım sonucu)
+ * =================================================================== */
+function exportScansToExcel(rows, baseName) {
+  const data = rows.map(s => ({
+    "Ürün Kodu": s.kod,
+    "Ürün Adı":  s.ad,
+    "Barkod":    s.barkod,
+    "Adet":      s.adet,
+    "Durum":     s.missing ? "TANIMLI DEĞİL" : "OK",
+    "Zaman":     new Date(s.ts).toLocaleString("tr-TR"),
+  }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  ws['!cols'] = [{wch:15},{wch:35},{wch:18},{wch:8},{wch:16},{wch:20}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Sayim");
+  const stamp = new Date().toISOString().slice(0,16).replace(/[:T]/g,"-");
+  XLSX.writeFile(wb, `${baseName}_${stamp}.xlsx`);
+  toast("Excel indirildi.", "ok");
+}
+
+/* ===================================================================
+ *  ÜRÜNLER (Import / Liste / Manual / Sil)
+ * =================================================================== */
+const fileImport = document.getElementById("fileImport");
+fileImport.addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: "array" });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    if (rows.length === 0) { toast("Dosya boş.", "warn"); return; }
+    await importRows(rows);
+  } catch (err) {
+    console.error(err);
+    toast("Dosya okunamadı.", "error");
+  } finally {
+    fileImport.value = "";
+  }
+});
+
+async function importRows(rows) {
+  let added = 0, updated = 0;
+  for (const r of rows) {
+    // Sütun adlarını esnek eşleştir
+    const kod    = normalize(pickField(r, ["kod","stok kodu","ürün kodu","urun kodu","code"]));
+    const ad     = normalize(pickField(r, ["ad","isim","ürün adı","urun adi","name","aciklama","açıklama"]));
+    const bkRaw  = normalize(pickField(r, ["barkod","barcode","ean","ean13"]));
+    const birim  = normalize(pickField(r, ["birim","unit"]));
+    const fiyat  = pickField(r, ["fiyat","price"]) || 0;
+    if (!kod) continue;
+    const barkodlar = bkRaw ? bkRaw.split(/[;,|]/).map(s => s.trim()).filter(Boolean) : [];
+    const obj = { kod, ad: ad || kod, barkodlar, birim: birim || "adet", fiyat: Number(fiyat) || 0 };
+    const idx = products.findIndex(p => p.kod === kod);
+    if (idx >= 0) { products[idx] = obj; updated++; }
+    else          { products.push(obj); added++; }
+    await saveProductCloud(obj);
+  }
+  reindex();
+  saveLocal();
+  renderProducts();
+  toast(`${added} eklendi, ${updated} güncellendi.`, "ok");
+}
+
+function pickField(row, names) {
+  // anahtarları küçük harfle eşleştir
+  const lower = {};
+  for (const k of Object.keys(row)) lower[k.toLowerCase().trim()] = row[k];
+  for (const n of names) {
+    if (n.toLowerCase() in lower) return lower[n.toLowerCase()];
+  }
+  return "";
+}
+
+const prodSearch = document.getElementById("prodSearch");
+prodSearch.addEventListener("input", renderProducts);
+
+function renderProducts() {
+  const list  = document.getElementById("productList");
+  const empty = document.getElementById("productEmpty");
+  const q = normalize(prodSearch.value).toLowerCase();
+  list.innerHTML = "";
+  const filtered = products.filter(p => {
+    if (!q) return true;
+    return (p.kod || "").toLowerCase().includes(q)
+        || (p.ad  || "").toLowerCase().includes(q)
+        || (p.barkodlar || []).some(b => b.toLowerCase().includes(q));
+  });
+  if (filtered.length === 0) {
+    empty.classList.remove("hidden");
+    empty.textContent = products.length === 0 ? "Henüz ürün tanımlı değil. Excel ile içe aktarın." : "Arama sonucu bulunamadı.";
+  } else {
+    empty.classList.add("hidden");
+    for (const p of filtered) {
+      const row = document.createElement("div");
+      row.className = "grid grid-cols-12 px-3 py-2 items-center text-sm";
+      row.innerHTML = `
+        <div class="col-span-3 font-mono text-xs">${escapeHtml(p.kod)}</div>
+        <div class="col-span-5">${escapeHtml(p.ad)}</div>
+        <div class="col-span-3 text-xs text-slate-300 break-all">${(p.barkodlar||[]).map(escapeHtml).join("<br>")}</div>
+        <div class="col-span-1 text-right space-x-1">
+          <button data-kod="${escapeHtml(p.kod)}" class="editProd text-blue-400 hover:text-blue-300">✎</button>
+          <button data-kod="${escapeHtml(p.kod)}" class="delProd  text-rose-400 hover:text-rose-300">×</button>
+        </div>
+      `;
+      list.appendChild(row);
+    }
+  }
+  list.querySelectorAll(".editProd").forEach(btn => {
+    btn.addEventListener("click", () => openProductModal(products.find(p=>p.kod===btn.dataset.kod)));
+  });
+  list.querySelectorAll(".delProd").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`"${btn.dataset.kod}" silinsin mi?`)) return;
+      products = products.filter(p => p.kod !== btn.dataset.kod);
+      await deleteProductCloud(btn.dataset.kod);
+      reindex(); saveLocal(); renderProducts();
+    });
+  });
+}
+
+document.getElementById("btnDeleteAll").addEventListener("click", async () => {
+  if (products.length === 0) return;
+  if (!confirm(`${products.length} ürünün TAMAMI silinecek. Emin misiniz?`)) return;
+  // cloud
+  if (db) {
+    const { doc, deleteDoc } = firestoreApi;
+    for (const p of products) {
+      try { await deleteDoc(doc(db, "products", p.kod)); } catch {}
+    }
+  }
+  products = [];
+  reindex(); saveLocal(); renderProducts();
+  toast("Tüm ürünler silindi.", "ok");
+});
+
+document.getElementById("btnExportProducts").addEventListener("click", () => {
+  if (products.length === 0) { toast("Ürün listesi boş.", "warn"); return; }
+  const data = products.map(p => ({
+    kod: p.kod, ad: p.ad,
+    barkod: (p.barkodlar||[]).join(";"),
+    birim: p.birim || "adet",
+    fiyat: p.fiyat || 0,
+  }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  ws['!cols'] = [{wch:15},{wch:35},{wch:30},{wch:10},{wch:10}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Urunler");
+  XLSX.writeFile(wb, "urunler.xlsx");
+});
+
+/* ----- Manual Modal ----- */
+const modal = document.getElementById("modalProduct");
+let editingKod = null;
+function openProductModal(p) {
+  editingKod = p ? p.kod : null;
+  document.getElementById("pfKod").value    = p ? p.kod : "";
+  document.getElementById("pfAd").value     = p ? p.ad  : "";
+  document.getElementById("pfBarkod").value = p ? (p.barkodlar||[]).join(";") : "";
+  document.getElementById("pfBirim").value  = p ? (p.birim||"") : "";
+  document.getElementById("pfFiyat").value  = p ? (p.fiyat||"") : "";
+  modal.classList.remove("hidden");
+  modal.classList.add("flex");
+}
+function closeProductModal() {
+  modal.classList.add("hidden");
+  modal.classList.remove("flex");
+}
+document.getElementById("btnAddProduct").addEventListener("click", () => openProductModal(null));
+document.getElementById("pfCancel").addEventListener("click", closeProductModal);
+document.getElementById("pfSave").addEventListener("click", async () => {
+  const kod = normalize(document.getElementById("pfKod").value);
+  const ad  = normalize(document.getElementById("pfAd").value);
+  if (!kod || !ad) { toast("Kod ve Ad zorunlu.", "warn"); return; }
+  const bkRaw = normalize(document.getElementById("pfBarkod").value);
+  const barkodlar = bkRaw ? bkRaw.split(/[;,|]/).map(s => s.trim()).filter(Boolean) : [];
+  const obj = {
+    kod, ad, barkodlar,
+    birim: normalize(document.getElementById("pfBirim").value) || "adet",
+    fiyat: Number(document.getElementById("pfFiyat").value) || 0,
+  };
+  // Kod değişikliği durumunda eskiyi sil
+  if (editingKod && editingKod !== kod) {
+    products = products.filter(p => p.kod !== editingKod);
+    await deleteProductCloud(editingKod);
+  }
+  const idx = products.findIndex(p => p.kod === kod);
+  if (idx >= 0) products[idx] = obj; else products.push(obj);
+  await saveProductCloud(obj);
+  reindex(); saveLocal(); renderProducts(); closeProductModal();
+  toast("Kaydedildi.", "ok");
+});
+
+/* ===================================================================
+ *  GEÇMİŞ
+ * =================================================================== */
+function renderHistory() {
+  const list  = document.getElementById("historyList");
+  const empty = document.getElementById("historyEmpty");
+  list.innerHTML = "";
+  if (history.length === 0) {
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  for (const h of history) {
+    const total = h.satirlar.reduce((t,s)=>t+s.adet,0);
+    const miss  = h.satirlar.filter(s=>s.missing).length;
+    const card = document.createElement("div");
+    card.className = "bg-slate-800 rounded-lg p-3 flex flex-wrap items-center gap-3";
+    card.innerHTML = `
+      <div class="flex-1 min-w-[200px]">
+        <div class="font-semibold">${escapeHtml(h.ad)}</div>
+        <div class="text-xs text-slate-400">${new Date(h.tarih).toLocaleString("tr-TR")}</div>
+      </div>
+      <div class="text-xs text-slate-300">
+        ${h.satirlar.length} satır · ${total} adet ${miss ? `· <span class="text-rose-400">${miss} tanımsız</span>` : ""}
+      </div>
+      <button data-id="${h.id}" class="histExport bg-emerald-500 text-slate-900 px-3 py-1.5 rounded text-sm font-semibold">Excel</button>
+      <button data-id="${h.id}" class="histDelete bg-rose-700 hover:bg-rose-800 px-3 py-1.5 rounded text-sm">Sil</button>
+    `;
+    list.appendChild(card);
+  }
+  list.querySelectorAll(".histExport").forEach(b => {
+    b.addEventListener("click", () => {
+      const h = history.find(x => x.id === b.dataset.id);
+      if (h) exportScansToExcel(h.satirlar, h.ad.replace(/[^\w]+/g,"_"));
+    });
+  });
+  list.querySelectorAll(".histDelete").forEach(b => {
+    b.addEventListener("click", () => {
+      if (!confirm("Bu sayım silinsin mi?")) return;
+      history = history.filter(x => x.id !== b.dataset.id);
+      saveLocal(); renderHistory();
+    });
+  });
+}
+
+/* ===================================================================
+ *  Utility
+ * =================================================================== */
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  })[c]);
+}
+
+/* ===================================================================
+ *  BOOT
+ * =================================================================== */
+(async () => {
+  loadLocal();
+  reindex();
+  renderProducts();
+  renderScans();
+  await initFirebase();
+  if (db) {
+    // Cloud önceliklidir: cloud'da varsa onları yükle
+    try { await loadProductsFromCloud(); } catch (e) { console.error(e); }
+  }
+  // Service worker (PWA)
+  if ("serviceWorker" in navigator) {
+    try { await navigator.serviceWorker.register("sw.js"); } catch {}
+  }
+  setTimeout(() => scanInput.focus(), 200);
+})();
+</script>
+</body>
+</html>
