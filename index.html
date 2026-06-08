@@ -251,10 +251,21 @@ const LS_PROD = "bs_products";
 const LS_SCAN = "bs_currentScan";
 const LS_HIST = "bs_history";
 
+function saveProductsLS() {
+  try { localStorage.setItem(LS_PROD, JSON.stringify(products)); } catch(e){ console.error(e); }
+}
+function saveScansLS() {
+  try { localStorage.setItem(LS_SCAN, JSON.stringify(scans)); } catch(e){ console.error(e); }
+}
+function saveHistoryLS() {
+  try { localStorage.setItem(LS_HIST, JSON.stringify(history)); } catch(e){ console.error(e); }
+}
+// Geriye uyumluluk: tümünü kaydet. Performans için yalnız değişeni saklayan üstteki
+// fonksiyonları kullanmak daha hızlıdır.
 function saveLocal() {
-  localStorage.setItem(LS_PROD, JSON.stringify(products));
-  localStorage.setItem(LS_SCAN, JSON.stringify(scans));
-  localStorage.setItem(LS_HIST, JSON.stringify(history));
+  saveProductsLS();
+  saveScansLS();
+  saveHistoryLS();
 }
 function loadLocal() {
   try { products = JSON.parse(localStorage.getItem(LS_PROD) || "[]"); } catch { products = []; }
@@ -418,8 +429,8 @@ function handleScan(code, qty) {
       adet: qty, ts: Date.now(), flash: true
     });
   }
-  saveLocal();
-  beepOk();
+  saveScansLS();
+  // 3. Madde: tanımlı barkodda ses çıkarmıyoruz, sadece hatada beepError() çalışır
   renderScans();
 }
 
@@ -434,7 +445,7 @@ function addMissingRow(code, qty) {
       adet: qty, ts: Date.now(), missing: true, flash: true
     });
   }
-  saveLocal();
+  saveScansLS();
 }
 
 function renderScans() {
@@ -481,7 +492,7 @@ function renderScans() {
       if (target) {
         const v = parseInt(inp.value) || 1;
         target.adet = Math.max(1, v);
-        saveLocal();
+        saveScansLS();
         renderScans();
       }
     });
@@ -493,7 +504,7 @@ function renderScans() {
     btn.addEventListener("click", () => {
       const kod = btn.dataset.kod, bk = btn.dataset.bk;
       scans = scans.filter(s => !(s.kod === kod && s.barkod === bk));
-      saveLocal();
+      saveScansLS();
       renderScans();
     });
   });
@@ -503,7 +514,7 @@ document.getElementById("btnClear").addEventListener("click", () => {
   if (scans.length === 0) return;
   if (!confirm("Tüm sayım satırları silinsin mi?")) return;
   scans = [];
-  saveLocal();
+  saveScansLS();
   renderScans();
 });
 
@@ -540,7 +551,29 @@ async function saveSessionCloud(session) {
 
 /* ===================================================================
  *  EXCEL EXPORT (sayım sonucu)
+ *  Android'de window.AndroidBridge varsa direkt base64'le kaydederiz
+ *  (blob URL üzerinden geçmediği için dosya adı/uzantısı korunur).
  * =================================================================== */
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+function saveWorkbook(wb, filename) {
+  const isAndroid = !!(window.AndroidBridge && typeof window.AndroidBridge.saveBase64 === "function");
+  if (isAndroid) {
+    try {
+      const b64 = XLSX.write(wb, { type: "base64", bookType: "xlsx" });
+      window.AndroidBridge.saveBase64(filename, XLSX_MIME, b64);
+      // Android tarafı Toast gösterecek; biz yine de bilgi verelim
+      toast("Excel kaydediliyor…", "ok");
+      return;
+    } catch (e) {
+      console.error("Android export hata:", e);
+      // hata olursa tarayıcı yoluna düş
+    }
+  }
+  XLSX.writeFile(wb, filename);
+  toast("Excel indirildi.", "ok");
+}
+
 function exportScansToExcel(rows, baseName) {
   const data = rows.map(s => ({
     "Ürün Kodu": s.kod,
@@ -555,8 +588,7 @@ function exportScansToExcel(rows, baseName) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Sayim");
   const stamp = new Date().toISOString().slice(0,16).replace(/[:T]/g,"-");
-  XLSX.writeFile(wb, `${baseName}_${stamp}.xlsx`);
-  toast("Excel indirildi.", "ok");
+  saveWorkbook(wb, `${baseName}_${stamp}.xlsx`);
 }
 
 /* ===================================================================
@@ -582,9 +614,12 @@ fileImport.addEventListener("change", async (e) => {
 });
 
 async function importRows(rows) {
+  toast(`${rows.length} satır işleniyor…`, "info");
   let added = 0, updated = 0;
+  // Hız için önce yerel diziyi bir kerede güncelle, sonra ihtiyaca göre cloud'a yaz
+  const byKod = new Map(products.map(p => [p.kod, p]));
+  const toCloud = [];
   for (const r of rows) {
-    // Sütun adlarını esnek eşleştir
     const kod    = normalize(pickField(r, ["kod","stok kodu","ürün kodu","urun kodu","code"]));
     const ad     = normalize(pickField(r, ["ad","isim","ürün adı","urun adi","name","aciklama","açıklama"]));
     const bkRaw  = normalize(pickField(r, ["barkod","barcode","ean","ean13"]));
@@ -593,15 +628,27 @@ async function importRows(rows) {
     if (!kod) continue;
     const barkodlar = bkRaw ? bkRaw.split(/[;,|]/).map(s => s.trim()).filter(Boolean) : [];
     const obj = { kod, ad: ad || kod, barkodlar, birim: birim || "adet", fiyat: Number(fiyat) || 0 };
-    const idx = products.findIndex(p => p.kod === kod);
-    if (idx >= 0) { products[idx] = obj; updated++; }
-    else          { products.push(obj); added++; }
-    await saveProductCloud(obj);
+    if (byKod.has(kod)) { Object.assign(byKod.get(kod), obj); updated++; }
+    else                { byKod.set(kod, obj); products.push(obj); added++; }
+    toCloud.push(obj);
   }
   reindex();
   saveLocal();
   renderProducts();
   toast(`${added} eklendi, ${updated} güncellendi.`, "ok");
+  // Firebase'e arka planda paralel olarak yaz (UI'yi bloklamadan)
+  if (db && toCloud.length > 0) {
+    pushToCloudBatched(toCloud);
+  }
+}
+
+// 10 paralel istek halinde cloud yazma (UI freeze etmesin)
+async function pushToCloudBatched(items) {
+  const BATCH = 10;
+  for (let i = 0; i < items.length; i += BATCH) {
+    const chunk = items.slice(i, i + BATCH);
+    await Promise.all(chunk.map(p => saveProductCloud(p).catch(e => console.error(e))));
+  }
 }
 
 function pickField(row, names) {
@@ -615,51 +662,97 @@ function pickField(row, names) {
 }
 
 const prodSearch = document.getElementById("prodSearch");
-prodSearch.addEventListener("input", renderProducts);
+// Arama debounce: yazarken her tuşa render etme, 150ms bekle
+let prodSearchTimer = null;
+prodSearch.addEventListener("input", () => {
+  clearTimeout(prodSearchTimer);
+  prodSearchTimer = setTimeout(renderProducts, 150);
+});
+
+// PERF: çok ürünlü listede UI freeze etmesin diye en fazla bu kadar satır gösterilir.
+// Daha fazlasını görmek için arama yapılmalı.
+const PRODUCT_RENDER_LIMIT = 200;
 
 function renderProducts() {
   const list  = document.getElementById("productList");
   const empty = document.getElementById("productEmpty");
   const q = normalize(prodSearch.value).toLowerCase();
-  list.innerHTML = "";
-  const filtered = products.filter(p => {
-    if (!q) return true;
-    return (p.kod || "").toLowerCase().includes(q)
-        || (p.ad  || "").toLowerCase().includes(q)
-        || (p.barkodlar || []).some(b => b.toLowerCase().includes(q));
-  });
-  if (filtered.length === 0) {
-    empty.classList.remove("hidden");
-    empty.textContent = products.length === 0 ? "Henüz ürün tanımlı değil. Excel ile içe aktarın." : "Arama sonucu bulunamadı.";
+  // Tek seferde innerHTML="" yapmak büyük ağaçlarda yavaş — replaceChildren ile sıfırla
+  list.replaceChildren();
+
+  // Filtre
+  let filtered;
+  if (!q) {
+    filtered = products;
   } else {
-    empty.classList.add("hidden");
-    for (const p of filtered) {
-      const row = document.createElement("div");
-      row.className = "grid grid-cols-12 px-3 py-2 items-center text-sm";
-      row.innerHTML = `
-        <div class="col-span-3 font-mono text-xs">${escapeHtml(p.kod)}</div>
-        <div class="col-span-5">${escapeHtml(p.ad)}</div>
-        <div class="col-span-3 text-xs text-slate-300 break-all">${(p.barkodlar||[]).map(escapeHtml).join("<br>")}</div>
-        <div class="col-span-1 text-right space-x-1">
-          <button data-kod="${escapeHtml(p.kod)}" class="editProd text-blue-400 hover:text-blue-300">✎</button>
-          <button data-kod="${escapeHtml(p.kod)}" class="delProd  text-rose-400 hover:text-rose-300">×</button>
-        </div>
-      `;
-      list.appendChild(row);
+    filtered = [];
+    for (const p of products) {
+      if ((p.kod || "").toLowerCase().includes(q)
+       || (p.ad  || "").toLowerCase().includes(q)
+       || (p.barkodlar || []).some(b => b.toLowerCase().includes(q))) {
+        filtered.push(p);
+        if (filtered.length >= PRODUCT_RENDER_LIMIT) break;
+      }
     }
   }
-  list.querySelectorAll(".editProd").forEach(btn => {
-    btn.addEventListener("click", () => openProductModal(products.find(p=>p.kod===btn.dataset.kod)));
-  });
-  list.querySelectorAll(".delProd").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      if (!confirm(`"${btn.dataset.kod}" silinsin mi?`)) return;
-      products = products.filter(p => p.kod !== btn.dataset.kod);
-      await deleteProductCloud(btn.dataset.kod);
-      reindex(); saveLocal(); renderProducts();
-    });
-  });
+
+  if (filtered.length === 0) {
+    empty.classList.remove("hidden");
+    empty.textContent = products.length === 0
+      ? "Henüz ürün tanımlı değil. Excel ile içe aktarın."
+      : "Arama sonucu bulunamadı.";
+    return;
+  }
+  empty.classList.add("hidden");
+
+  // DocumentFragment ile toplu DOM yazımı
+  const frag = document.createDocumentFragment();
+  const max = Math.min(filtered.length, PRODUCT_RENDER_LIMIT);
+  for (let i = 0; i < max; i++) {
+    const p = filtered[i];
+    const row = document.createElement("div");
+    row.className = "grid grid-cols-12 px-3 py-2 items-center text-sm";
+    row.dataset.kod = p.kod;
+    row.innerHTML = `
+      <div class="col-span-3 font-mono text-xs">${escapeHtml(p.kod)}</div>
+      <div class="col-span-5">${escapeHtml(p.ad)}</div>
+      <div class="col-span-3 text-xs text-slate-300 break-all">${(p.barkodlar||[]).map(escapeHtml).join("<br>")}</div>
+      <div class="col-span-1 text-right space-x-1">
+        <button class="editProd text-blue-400 hover:text-blue-300">✎</button>
+        <button class="delProd text-rose-400 hover:text-rose-300">×</button>
+      </div>
+    `;
+    frag.appendChild(row);
+  }
+  // Limit aşıldıysa kullanıcıyı bilgilendir
+  if (!q && products.length > PRODUCT_RENDER_LIMIT) {
+    const info = document.createElement("div");
+    info.className = "px-3 py-2 text-xs text-slate-400 bg-slate-900";
+    info.textContent = `İlk ${PRODUCT_RENDER_LIMIT} satır gösteriliyor (toplam ${products.length}). Arama kutusunu kullanın.`;
+    frag.appendChild(info);
+  } else if (q && filtered.length >= PRODUCT_RENDER_LIMIT) {
+    const info = document.createElement("div");
+    info.className = "px-3 py-2 text-xs text-slate-400 bg-slate-900";
+    info.textContent = `${PRODUCT_RENDER_LIMIT}+ eşleşme bulundu. Aramayı daraltın.`;
+    frag.appendChild(info);
+  }
+  list.appendChild(frag);
 }
+
+// Event delegation: her satıra ayrı listener bağlamak yerine tek listener
+document.getElementById("productList").addEventListener("click", async (e) => {
+  const row = e.target.closest("[data-kod]");
+  if (!row) return;
+  const kod = row.dataset.kod;
+  if (e.target.classList.contains("editProd")) {
+    openProductModal(products.find(p => p.kod === kod));
+  } else if (e.target.classList.contains("delProd")) {
+    if (!confirm(`"${kod}" silinsin mi?`)) return;
+    products = products.filter(p => p.kod !== kod);
+    reindex(); saveLocal(); renderProducts();
+    deleteProductCloud(kod).catch(err => console.error(err));
+  }
+});
 
 document.getElementById("btnDeleteAll").addEventListener("click", async () => {
   if (products.length === 0) return;
@@ -688,7 +781,7 @@ document.getElementById("btnExportProducts").addEventListener("click", () => {
   ws['!cols'] = [{wch:15},{wch:35},{wch:30},{wch:10},{wch:10}];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Urunler");
-  XLSX.writeFile(wb, "urunler.xlsx");
+  saveWorkbook(wb, "urunler.xlsx");
 });
 
 /* ----- Manual Modal ----- */
